@@ -1,0 +1,36 @@
+# IntegrationEngine 설정
+# Wazuh Indexer (OpenSearch/Elasticsearch) 연동 설정
+
+# 디버그 모드 (상세한 로그 출력)
+debug: true
+
+# Wazuh Indexer 연결 정보
+wazuh:
+  host: elasticsearch
+  port: 9200
+  scheme: http
+  verify_ssl: false
+  username: elastic
+  password: Kimdong2024
+  index_pattern: "wazuh-alerts-*"
+
+# 매칭 설정
+match:
+  # 시간 윈도우 (초) - 작전 실행 시간 전후로 탐지를 찾을 범위
+  # 공격과 탐지 사이에 시간 차이가 있을 수 있으므로 넉넉하게 설정
+  time_window_sec: 7200  # 2시간 (±2시간 = 총 4시간 범위)
+
+  # 최대 알림 개수
+  max_alerts: 500
+
+  # MITRE technique ID를 찾을 필드 목록
+  mitre_fields:
+    - "data.mitre.id"
+    - "rule.mitre.id"
+    - "mitre.id"
+    - "rule.mitre.technique"
+
+  # 추가로 검색할 메시지 필드 (옵션)
+  message_fields:
+    - "message"
+    - "full_log"

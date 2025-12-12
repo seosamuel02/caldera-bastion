@@ -1,0 +1,28 @@
+[flake8]
+max-line-length = 120
+exclude =
+    .git,
+    __pycache__,
+    build,
+    dist,
+    *.pyc,
+    .tox,
+    .eggs,
+    *.egg-info,
+    .pytest_cache,
+    htmlcov,
+    .coverage
+ignore =
+    # line too long - handled by max-line-length
+    E501,
+    # line break before binary operator
+    W503,
+    # whitespace before ':'
+    E203,
+    # missing whitespace after ','
+    E231
+per-file-ignores =
+    # imported but unused in __init__.py
+    __init__.py:F401
+    # local variable assigned but never used in tests
+    tests/*.py:F841
