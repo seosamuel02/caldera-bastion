@@ -33,7 +33,7 @@ const expandedDetections = ref(new Set());
 // Pagination for detection events
 const detectionCurrentPage = ref(1);
 const detectionPageSize = ref(10);
-const allDetectionEvents = ref([]); // 72시간 전체 이벤트 저장용
+const allDetectionEvents = ref([]); // For storing all events from last 72 hours
 
 const toggleDetectionDetail = (idx) => {
   if (expandedDetections.value.has(idx)) {
@@ -71,7 +71,7 @@ const transformDetectionEvents = (rawEvents) => {
     location: ev.location || '',
     predecoder: ev.predecoder || {},
     decoder: ev.decoder || {},
-    // SUMMARY fields (API 응답: agent_ip, audit_command, audit_cwd, audit_type, audit_exe, srcip, dstip)
+    // SUMMARY fields (API response: agent_ip, audit_command, audit_cwd, audit_type, audit_exe, srcip, dstip)
     agent_ip: ev.agent_ip || ev['agent.ip'] || null,
     audit_command: ev.audit_command || ev['data.audit.command'] || null,
     audit_cwd: ev.audit_cwd || ev['data.audit.cwd'] || null,
@@ -138,9 +138,9 @@ const heatMapData = reactive({
 
 watch(() => filters.operation_id, async (newValue, oldValue) => {
   if (newValue !== oldValue) {
-    detectionCurrentPage.value = 1; // 페이지 리셋
+    detectionCurrentPage.value = 1; // Reset page
     if (newValue === 'all') {
-      await fetchAllDetectionEvents(); // all 선택시 72시간 전체 로그 로드
+      await fetchAllDetectionEvents(); // Load all logs from last 72 hours when 'all' selected
     }
     await fetchDashboardSummary();
     await fetchAgents();
@@ -171,7 +171,7 @@ onMounted(async () => {
   await fetchDashboardSummary();
   await fetchHeatMapData();
 
-  // operation_id가 'all'이면 72시간 전체 이벤트 로드
+  // Load all events from last 72 hours if operation_id is 'all'
   if (filters.operation_id === 'all') {
     await fetchAllDetectionEvents();
   }
@@ -250,7 +250,7 @@ const fetchHeatMapData = async () => {
   }
 };
 
-// operation_id가 'all'일 때 72시간 전체 detection events 로드
+// Load all detection events from last 72 hours when operation_id is 'all'
 const fetchAllDetectionEvents = async () => {
   try {
     const url = `/plugin/bastion/dashboard?hours=72&min_level=${filters.min_level}`;
@@ -326,7 +326,7 @@ const clearAgentFilter = () => {
 };
 
 const filteredDetections = computed(() => {
-  // operation_id가 'all'이면 allDetectionEvents 사용, 아니면 기존 detectionEvents 사용
+  // Use allDetectionEvents if operation_id is 'all', otherwise use existing detectionEvents
   let detections = filters.operation_id === 'all'
     ? allDetectionEvents.value
     : detectionEvents.value;
@@ -353,7 +353,7 @@ const filteredDetections = computed(() => {
   return detections;
 });
 
-// 페이지네이션 관련 computed
+// Pagination related computed
 const detectionTotalPages = computed(() => {
   return Math.ceil(filteredDetections.value.length / detectionPageSize.value) || 1;
 });
@@ -398,7 +398,7 @@ const detectionPageNumbers = computed(() => {
 const goToDetectionPage = (page) => {
   if (page === '...') return;
   detectionCurrentPage.value = page;
-  expandedDetections.value = new Set(); // 페이지 변경시 확장된 항목 초기화
+  expandedDetections.value = new Set(); // Reset expanded items on page change
 };
 
 const prevDetectionPage = () => {
@@ -751,10 +751,10 @@ const tacticChartOptions = {
 };
 
 const filteredTimeline = computed(() => {
-  // MITRE Technique ID 기준으로 그룹화
+  // Group by MITRE Technique ID
   const techniqueMap = {};
 
-  // 1. 공격 스텝에서 technique_id 별 카운트
+  // 1. Count by technique_id from attack steps
   for (const op of filteredOperations.value) {
     for (const step of (op.attack_steps || [])) {
       if (filters.os_filter !== 'all') {
@@ -774,7 +774,7 @@ const filteredTimeline = computed(() => {
     }
   }
 
-  // 2. 탐지 이벤트에서 technique_id 별 카운트
+  // 2. Count by technique_id from detection events
   filteredDetections.value.forEach(detection => {
     const techId = detection.technique_id || 'Unknown';
     if (!techniqueMap[techId]) {
@@ -783,7 +783,7 @@ const filteredTimeline = computed(() => {
     techniqueMap[techId].detections += 1;
   });
 
-  // technique_id로 정렬하여 반환
+  // Return sorted by technique_id
   return Object.values(techniqueMap).sort((a, b) => a.technique.localeCompare(b.technique));
 });
 
@@ -793,7 +793,7 @@ const timelineChartData = computed(() => {
     return { labels: [], datasets: [] };
   }
   return {
-    labels: timeline.map(d => d.technique),  // MITRE Technique ID를 라벨로 사용
+    labels: timeline.map(d => d.technique),  // Use MITRE Technique ID as label
     datasets: [
       {
         label: 'ATTACKS',
