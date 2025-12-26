@@ -5,12 +5,16 @@ from datetime import datetime, timedelta, timezone
 
 try:
     from opensearchpy import OpenSearch
-except Exception:
+except Exception as e:
+    import logging
+    logging.getLogger('integration_engine').debug(f'[IntegrationEngine] OpenSearch import 실패: {e}')
     OpenSearch = None
 
 try:
     from elasticsearch import Elasticsearch
-except Exception:
+except Exception as e:
+    import logging
+    logging.getLogger('integration_engine').debug(f'[IntegrationEngine] Elasticsearch import 실패: {e}')
     Elasticsearch = None
 
 
@@ -35,7 +39,10 @@ def _to_dt(value):
         try:
             dt = datetime.fromisoformat(s)
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-        except Exception:
+        except Exception as e:
+            # timestamp 변환 실패는 흔한 일이므로 디버그 레벨만 로깅
+            import logging
+            logging.getLogger('integration_engine').debug(f'[IntegrationEngine] datetime 변환 실패: {s}, error: {e}')
             return None
     return None
 
@@ -159,7 +166,9 @@ class IntegrationEngine:
                         timestamp = ts_dt.timestamp()
                     elif isinstance(ts_dt, (int, float)):
                         timestamp = float(ts_dt)
-                except Exception:
+                except Exception as e:
+                    import logging
+                    logging.getLogger('integration_engine').debug(f'[IntegrationEngine] timestamp 변환 실패: {ts_dt}, error: {e}')
                     timestamp = None
 
             return {
@@ -308,6 +317,104 @@ class IntegrationEngine:
                     return val
         return None
 
+    def _extract_pid(self, data: dict) -> str | None:
+        """Wazuh 알림에서 PID 추출 (Linux auditd / Windows Sysmon)"""
+        if not isinstance(data, dict):
+            return None
+
+        # Linux auditd: data.audit.pid
+        audit = data.get('audit')
+        if isinstance(audit, dict):
+            pid = audit.get('pid')
+            if pid:
+                return str(pid)
+
+        # Windows Sysmon: data.win.eventdata.processId
+        win = data.get('win')
+        if isinstance(win, dict):
+            eventdata = win.get('eventdata')
+            if isinstance(eventdata, dict):
+                pid = eventdata.get('processId') or eventdata.get('ProcessId')
+                if pid:
+                    return str(pid)
+
+        return None
+
+    def _extract_ppid(self, data: dict) -> str | None:
+        """Wazuh 알림에서 PPID(Parent PID) 추출 (Linux auditd / Windows Sysmon)"""
+        if not isinstance(data, dict):
+            return None
+
+        # Linux auditd: data.audit.ppid
+        audit = data.get('audit')
+        if isinstance(audit, dict):
+            ppid = audit.get('ppid')
+            if ppid:
+                return str(ppid)
+
+        # Windows Sysmon: data.win.eventdata.parentProcessId
+        win = data.get('win')
+        if isinstance(win, dict):
+            eventdata = win.get('eventdata')
+            if isinstance(eventdata, dict):
+                ppid = eventdata.get('parentProcessId') or eventdata.get('ParentProcessId')
+                if ppid:
+                    return str(ppid)
+
+        return None
+
+    def _match_pid(self, link_pid, alert_pid: str | None, alert_ppid: str | None) -> tuple[bool, str | None]:
+        """PID 매칭 확인 및 매칭 타입 반환
+
+        Args:
+            link_pid: Caldera 링크의 PID (int, str, or None)
+            alert_pid: Wazuh 알림의 PID
+            alert_ppid: Wazuh 알림의 PPID (Parent PID)
+
+        Returns:
+            (matched, match_type) - match_type: 'pid'|'ppid'|None
+        """
+        if link_pid is None:
+            return (False, None)
+
+        link_pid_str = str(link_pid)
+
+        # 직접 PID 매칭 (우선순위 높음)
+        if alert_pid and str(alert_pid) == link_pid_str:
+            return (True, 'pid')
+
+        # PPID 매칭 (자식 프로세스가 탐지된 경우)
+        if alert_ppid and str(alert_ppid) == link_pid_str:
+            return (True, 'ppid')
+
+        return (False, None)
+
+    def _calculate_confidence(self, matches: list[dict], link_pid) -> float:
+        """탐지 신뢰도 점수 계산 (0.0 ~ 1.0)
+
+        - MITRE + Time 매칭: 0.5 (기본)
+        - PID 직접 매칭: +0.4
+        - PPID 매칭: +0.3
+        """
+        if not matches:
+            return 0.0
+
+        base_score = 0.5  # MITRE + Time 매칭 기본 점수
+
+        # PID 매칭 가산점
+        pid_matches = [m for m in matches if m.get('pid_matched', False)]
+        if pid_matches:
+            # PID 직접 매칭 확인
+            direct_pid = any(m.get('pid_match_type') == 'pid' for m in pid_matches)
+            ppid_match = any(m.get('pid_match_type') == 'ppid' for m in pid_matches)
+
+            if direct_pid:
+                base_score += 0.4  # PID 직접 매칭
+            elif ppid_match:
+                base_score += 0.3  # PPID 매칭
+
+        return min(base_score, 1.0)
+
     def _summarize_hit(self, hit: dict) -> dict:
         """Summarize Elasticsearch/OpenSearch hit (safe processing)"""
         try:
@@ -357,7 +464,9 @@ class IntegrationEngine:
                     src.get('mitre.id'),
                     src.get('rule.mitre.id')
                 )
-            except Exception:
+            except Exception as e:
+                if self.debug:
+                    print(f"[DEBUG] MITRE ID 추출 실패: {e}")
                 mitre_id = None
 
             # Extract MITRE tactic
@@ -397,6 +506,10 @@ class IntegrationEngine:
                 'description': description,
                 'data.audit.type': data.get('audit', {}).get('type') if isinstance(data, dict) and isinstance(data.get('audit'), dict) else None,
                 'data.audit.exe': data.get('audit', {}).get('exe') if isinstance(data, dict) and isinstance(data.get('audit'), dict) else None,
+
+                # PID 필드 추출 (Linux auditd / Windows Sysmon)
+                'pid': self._extract_pid(data),
+                'ppid': self._extract_ppid(data),
             }
         except Exception as e:
             if self.debug:
@@ -437,8 +550,8 @@ class IntegrationEngine:
                 print(f"[DEBUG] Technique: {technique_id}")
                 try:
                     print(f"[DEBUG] Timestamp: {datetime.fromtimestamp(ts_epoch, tz=timezone.utc)}")
-                except Exception:
-                    print(f"[DEBUG] Timestamp: {ts_epoch} (raw)")
+                except Exception as e:
+                    print(f"[DEBUG] Timestamp: {ts_epoch} (raw, conversion failed: {e})")
 
             resp = self.client.search(index=index, body=body)
 
@@ -460,8 +573,8 @@ class IntegrationEngine:
                         print(f"  - data.mitre.id: {sample.get('data', {}).get('mitre', {}).get('id')}")
                         print(f"  - rule.mitre: {sample.get('rule', {}).get('mitre')}")
                         print(f"  - agent: {sample.get('agent')}")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[DEBUG] Sample hit 출력 실패: {e}")
 
             # Process results (safely)
             results = []
@@ -516,22 +629,62 @@ class IntegrationEngine:
                     ts_dt = _to_dt(ts_raw)
                     ts_epoch = ts_dt.timestamp() if ts_dt else None
 
+                    # PID 추출 (Caldera 공격 로그)
+                    link_pid = getattr(link, 'pid', None)
+
                     if self.debug:
                         print(f"\n[DEBUG] --- Link {idx}/{len(chain)} ---")
                         print(f"[DEBUG] Ability: {ability_name}")
                         print(f"[DEBUG] Technique: {technique_id}")
                         print(f"[DEBUG] Timestamp: {ts_dt} ({ts_epoch})")
+                        print(f"[DEBUG] PID: {link_pid}")
 
                     matches = []
                     if technique_id and ts_epoch:
                         try:
                             matches = await loop.run_in_executor(None, self._search, technique_id, ts_epoch)
 
+                            # PID 매칭 적용
+                            if matches and link_pid:
+                                for match in matches:
+                                    pid_matched, match_type = self._match_pid(
+                                        link_pid,
+                                        match.get('pid'),
+                                        match.get('ppid')
+                                    )
+                                    match['pid_matched'] = pid_matched
+                                    match['pid_match_type'] = match_type
+
+                                # PID 매칭된 결과만 필터링 (PID가 있을 때)
+                                # PID 매칭되지 않은 결과는 제거하여 정확도 향상
+                                pid_filtered_matches = [m for m in matches if m.get('pid_matched', False)]
+
+                                if pid_filtered_matches:
+                                    # PID 매칭된 결과가 있으면 해당 결과만 사용
+                                    matches = pid_filtered_matches
+                                    if self.debug:
+                                        print(f"[DEBUG] PID filtering applied: {len(matches)} matches with PID match")
+                                else:
+                                    # PID 매칭된 결과가 없으면 매칭 없음으로 처리
+                                    # (PID가 있는데 일치하는 탐지가 없으면 정확한 매칭이 아님)
+                                    matches = []
+                                    if self.debug:
+                                        print(f"[DEBUG] No PID matches found - clearing all matches (link.pid={link_pid} not found in any alert)")
+
+                                # PID 직접 매칭 우선 정렬 (pid > ppid > timestamp)
+                                matches.sort(key=lambda m: (
+                                    m.get('pid_match_type') != 'pid',  # pid 매칭 우선
+                                    m.get('pid_match_type') != 'ppid',  # ppid 매칭 그 다음
+                                    m.get('@timestamp', '')
+                                ))
+
                             if self.debug:
                                 if matches:
-                                    print(f"[DEBUG] ✓ Matches found: {len(matches)}")
+                                    pid_match_count = sum(1 for m in matches if m.get('pid_matched', False))
+                                    print(f"[DEBUG] ✓ Matches found: {len(matches)} (PID matched: {pid_match_count})")
                                     for m in matches[:3]:  # 처음 3개만 샘플 출력
-                                        print(f"  - rule.id={m.get('rule.id')}, ts={m.get('@timestamp')}")
+                                        pid_info = f", pid_matched={m.get('pid_matched')}" if link_pid else ""
+                                        print(f"  - rule.id={m.get('rule.id')}, ts={m.get('@timestamp')}{pid_info}")
                                 else:
                                     print(f"[DEBUG] ✗ No matches found for technique={technique_id}")
                         except Exception as search_err:
@@ -543,13 +696,21 @@ class IntegrationEngine:
                             reason = "no technique_id" if not technique_id else "no timestamp"
                             print(f"[DEBUG] ⊘ Skipped - {reason}")
 
+                    # PID 매칭 통계 및 신뢰도 계산
+                    pid_match_count = sum(1 for m in matches if m.get('pid_matched', False))
+                    confidence = self._calculate_confidence(matches, link_pid)
+
                     results.append({
                         'link_id': str(getattr(link, 'id', '')),
+                        'paw': str(getattr(link, 'paw', '')),
                         'ability_name': ability_name or '',
                         'technique_id': technique_id or '',
                         'executed_at': _iso(ts_dt) if ts_dt else None,
                         'detected': len(matches) > 0,
                         'match_count': len(matches),
+                        'pid': link_pid,
+                        'pid_match_count': pid_match_count,
+                        'confidence': confidence,
                         'matches': matches
                     })
                 except Exception as link_err:
@@ -558,18 +719,25 @@ class IntegrationEngine:
                     # Add minimal info even on error
                     results.append({
                         'link_id': str(getattr(link, 'id', '')) if link else f'error_{idx}',
+                        'paw': str(getattr(link, 'paw', '')) if link else '',
                         'ability_name': '',
                         'technique_id': '',
                         'executed_at': None,
                         'detected': False,
                         'match_count': 0,
+                        'pid': None,
+                        'pid_match_count': 0,
+                        'confidence': 0.0,
                         'matches': []
                     })
 
             if self.debug:
                 detected_count = sum(1 for r in results if r.get('detected', False))
+                pid_matched_count = sum(1 for r in results if r.get('pid_match_count', 0) > 0)
+                avg_confidence = sum(r.get('confidence', 0.0) for r in results) / len(results) if results else 0.0
                 print(f"\n[DEBUG] ========== Correlation End ==========")
-                print(f"[DEBUG] Total: {len(results)}, Detected: {detected_count}")
+                print(f"[DEBUG] Total: {len(results)}, Detected: {detected_count}, PID Matched: {pid_matched_count}")
+                print(f"[DEBUG] Average Confidence: {avg_confidence:.2f}")
 
             return results
         except Exception as e:
